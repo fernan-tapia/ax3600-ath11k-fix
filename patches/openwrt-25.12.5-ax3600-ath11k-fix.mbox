@@ -1,0 +1,325 @@
+From 31622f2685731bda146ccf63c48ba9fb8441506e Mon Sep 17 00:00:00 2001
+From: Julius Bairaktaris <julius@bairaktaris.de>
+Date: Wed, 5 Aug 2026 12:09:47 +0200
+Subject: [PATCH 1/2] mac80211: ath11k: stop a firmware crash from rebooting
+ the SoC on AHB
+
+On IPQ8074 a firmware assert reboots the SoC.
+ath11k_core_reconfigure_on_crash() frees the data path and clears the
+ring list while the DP NAPI is still polling, so the NAPI services a ring
+whose address pointer has just been cleared:
+
+  Unable to handle kernel read from unreadable memory at virtual address 0
+  pc : ath11k_hal_srng_access_begin+0xc/0x60 [ath11k]
+  Call trace:
+   ath11k_hal_srng_access_begin+0xc/0x60 [ath11k] (P)
+   ath11k_dp_rx_process_mon_rings+0xa0/0x5d4 [ath11k]
+   ath11k_dp_service_srng+0x1f4/0x348 [ath11k]
+   ath11k_ahb_ext_grp_napi_poll+0x34/0xd4 [ath11k_ahb]
+
+951 disables the interrupts on the crash path again. 950 is its
+prerequisite: it wires up the CE interrupt ops that
+ath11k_ahb_hif_ops_ipq8074 never set, which leaves the CE half of the
+quiesce a no-op on AHB. Both are in ath-next as commit a7ab5c835e42
+("wifi: ath11k: implement CE interrupt enable/disable for AHB") and
+commit f7a74e131d3f ("wifi: ath11k: disable interrupts during firmware
+crash recovery"), and are carried here verbatim.
+
+Tested on a Xiaomi AX3600 (IPQ8074 hw2.0) with the debugfs
+simulate_fw_crash assert trigger: one assert panics and reboots the SoC
+before, five asserts recover after.
+
+Assisted-by: Claude:claude-opus-5
+Signed-off-by: Julius Bairaktaris <julius@bairaktaris.de>
+Link: https://github.com/openwrt/openwrt/pull/24578
+Signed-off-by: Robert Marko <robimarko@gmail.com>
+---
+ package/kernel/mac80211/Makefile              |  2 +-
+ ...-CE-interrupt-enable-disable-for-AHB.patch | 57 +++++++++++++++
+ ...rupts-during-firmware-crash-recovery.patch | 72 +++++++++++++++++++
+ 3 files changed, 130 insertions(+), 1 deletion(-)
+ create mode 100644 package/kernel/mac80211/patches/ath11k/950-wifi-ath11k-implement-CE-interrupt-enable-disable-for-AHB.patch
+ create mode 100644 package/kernel/mac80211/patches/ath11k/951-wifi-ath11k-disable-interrupts-during-firmware-crash-recovery.patch
+
+diff --git a/package/kernel/mac80211/Makefile b/package/kernel/mac80211/Makefile
+index aec88b692b..2b518e34bf 100644
+--- a/package/kernel/mac80211/Makefile
++++ b/package/kernel/mac80211/Makefile
+@@ -11,7 +11,7 @@ include $(INCLUDE_DIR)/kernel.mk
+ PKG_NAME:=mac80211
+ 
+ PKG_VERSION:=6.18.26
+-PKG_RELEASE:=1
++PKG_RELEASE:=2
+ PKG_LICENSE:=GPL-2.0-only
+ PKG_LICENSE_FILES:=COPYING
+ 
+diff --git a/package/kernel/mac80211/patches/ath11k/950-wifi-ath11k-implement-CE-interrupt-enable-disable-for-AHB.patch b/package/kernel/mac80211/patches/ath11k/950-wifi-ath11k-implement-CE-interrupt-enable-disable-for-AHB.patch
+new file mode 100644
+index 0000000000..61fc21fc9a
+--- /dev/null
++++ b/package/kernel/mac80211/patches/ath11k/950-wifi-ath11k-implement-CE-interrupt-enable-disable-for-AHB.patch
+@@ -0,0 +1,57 @@
++From a7ab5c835e4253b6577e4137367c05bfddd79fa2 Mon Sep 17 00:00:00 2001
++From: Julius Bairaktaris <julius@bairaktaris.de>
++Date: Mon, 27 Jul 2026 00:19:07 +0200
++Subject: [PATCH] wifi: ath11k: implement CE interrupt enable/disable for AHB
++
++ath11k_core_reset() calls ath11k_hif_ce_irq_disable() right before it
++powers the target down, but ath11k_ahb_hif_ops_ipq8074 never set the
++ce_irq_enable/ce_irq_disable pair, and ath11k_hif_ce_irq_disable() does
++nothing when the op is NULL. On AHB the copy engine interrupts and their
++tasklets therefore stay live across rproc_shutdown(), where the register
++space they touch is no longer accessible.
++
++Wire the ops up. The sequence is the one ath11k_ahb_stop() already runs,
++factored into a helper and reused, so behaviour on the stop path is
++unchanged. wcn6750 is not affected: it uses the pcic ops, which
++implement the pair already.
++
++Assisted-by: Claude:claude-opus-5
++Signed-off-by: Julius Bairaktaris <julius@bairaktaris.de>
++Reviewed-by: Rameshkumar Sundaram <rameshkumar.sundaram@oss.qualcomm.com>
++Reviewed-by: Baochen Qiang <baochen.qiang@oss.qualcomm.com>
++Link: https://patch.msgid.link/20260726221908.104873-2-julius@bairaktaris.de
++Signed-off-by: Jeff Johnson <jeff.johnson@oss.qualcomm.com>
++---
++ drivers/net/wireless/ath/ath11k/ahb.c | 9 ++++++++-
++ 1 file changed, 8 insertions(+), 1 deletion(-)
++
++--- a/drivers/net/wireless/ath/ath11k/ahb.c
+++++ b/drivers/net/wireless/ath/ath11k/ahb.c
++@@ -400,12 +400,17 @@ static void ath11k_ahb_ext_irq_disable(s
++ 	ath11k_ahb_sync_ext_irqs(ab);
++ }
++ 
++-static void ath11k_ahb_stop(struct ath11k_base *ab)
+++static void ath11k_ahb_ce_irq_disable_sync(struct ath11k_base *ab)
++ {
++ 	if (!test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags))
++ 		ath11k_ahb_ce_irqs_disable(ab);
++ 	ath11k_ahb_sync_ce_irqs(ab);
++ 	ath11k_ahb_kill_tasklets(ab);
+++}
+++
+++static void ath11k_ahb_stop(struct ath11k_base *ab)
+++{
+++	ath11k_ahb_ce_irq_disable_sync(ab);
++ 	timer_delete_sync(&ab->rx_replenish_retry);
++ 	ath11k_ce_cleanup_pipes(ab);
++ }
++@@ -795,6 +800,8 @@ static const struct ath11k_hif_ops ath11
++ 	.map_service_to_pipe = ath11k_ahb_map_service_to_pipe,
++ 	.power_down = ath11k_ahb_power_down,
++ 	.power_up = ath11k_ahb_power_up,
+++	.ce_irq_enable = ath11k_ahb_ce_irqs_enable,
+++	.ce_irq_disable = ath11k_ahb_ce_irq_disable_sync,
++ };
++ 
++ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_wcn6750 = {
+diff --git a/package/kernel/mac80211/patches/ath11k/951-wifi-ath11k-disable-interrupts-during-firmware-crash-recovery.patch b/package/kernel/mac80211/patches/ath11k/951-wifi-ath11k-disable-interrupts-during-firmware-crash-recovery.patch
+new file mode 100644
+index 0000000000..996ce9b5b0
+--- /dev/null
++++ b/package/kernel/mac80211/patches/ath11k/951-wifi-ath11k-disable-interrupts-during-firmware-crash-recovery.patch
+@@ -0,0 +1,72 @@
++From f7a74e131d3f0de04335dbe278bfb82bdafcdb3e Mon Sep 17 00:00:00 2001
++From: Julius Bairaktaris <julius@bairaktaris.de>
++Date: Mon, 27 Jul 2026 00:19:08 +0200
++Subject: [PATCH] wifi: ath11k: disable interrupts during firmware crash recovery
++
++On IPQ8074 a firmware assert reboots the SoC:
++
++  Unable to handle kernel read from unreadable memory at virtual address 0
++  pc : ath11k_hal_srng_access_begin+0xc/0x60 [ath11k]
++  lr : ath11k_dp_rx_process_mon_status+0x15c/0xd84 [ath11k]
++  Call trace:
++   ath11k_hal_srng_access_begin+0xc/0x60 [ath11k]
++   ath11k_dp_rx_process_mon_rings+0xa0/0x5d4 [ath11k]
++   ath11k_dp_service_srng+0x1f4/0x348 [ath11k]
++   ath11k_ahb_ext_grp_napi_poll+0x34/0xd4 [ath11k_ahb]
++   __napi_poll+0x38/0x188
++   net_rx_action+0x120/0x2c0
++
++ath11k_core_reconfigure_on_crash() tears the data path down with
++ath11k_dp_pdev_free(), ath11k_dp_free() and ath11k_hal_srng_clear(),
++which memsets the ring list. The DP NAPI is still running while that
++happens, so it services a ring whose address pointer has just been
++cleared.
++
++That function used to disable the interrupts first, until
++commit d455e805de70 ("wifi: ath11k: rearrange IRQ enable/disable in reset path")
++moved the disable into ath11k_core_reset(). reset_work is only queued
++from mhi.c and from the debugfs hw-restart handler, so AHB parts never
++run it on a real firmware crash. Their recovery goes QMI server exit ->
++restart_work -> ath11k_core_reconfigure_on_crash() ->
++ath11k_core_qmi_firmware_ready(), and nothing disables the interrupts
++anywhere along it.
++
++Disable them again on the crash path. The reset path has already done
++so by the time it gets here, hence the ab->is_reset check.
++
++This is also why the debugfs hw-restart trigger never showed the
++problem: it goes through ath11k_core_reset(), the one path that still
++had the disable.
++
++Tested-on: IPQ8074 hw2.0 AHB WLAN.HK.2.12-01460-QCAHKSWPL_SILICONZ-1
++
++Fixes: d455e805de70 ("wifi: ath11k: rearrange IRQ enable/disable in reset path")
++Assisted-by: Claude:claude-opus-5
++Signed-off-by: Julius Bairaktaris <julius@bairaktaris.de>
++Reviewed-by: Rameshkumar Sundaram <rameshkumar.sundaram@oss.qualcomm.com>
++Reviewed-by: Baochen Qiang <baochen.qiang@oss.qualcomm.com>
++Link: https://patch.msgid.link/20260726221908.104873-3-julius@bairaktaris.de
++Signed-off-by: Jeff Johnson <jeff.johnson@oss.qualcomm.com>
++---
++ drivers/net/wireless/ath/ath11k/core.c | 10 ++++++++++
++ 1 file changed, 10 insertions(+)
++
++--- a/drivers/net/wireless/ath/ath11k/core.c
+++++ b/drivers/net/wireless/ath/ath11k/core.c
++@@ -2394,6 +2394,16 @@ static int ath11k_core_reconfigure_on_cr
++ 
++ 	mutex_lock(&ab->core_lock);
++ 	ath11k_thermal_unregister(ab);
+++
+++	/*
+++	 * ath11k_core_reset() already disabled the interrupts on the reset
+++	 * path; only the firmware crash path reaches here with them live.
+++	 */
+++	if (!ab->is_reset) {
+++		ath11k_hif_irq_disable(ab);
+++		ath11k_hif_ce_irq_disable(ab);
+++	}
+++
++ 	ath11k_dp_pdev_free(ab);
++ 	ath11k_cfr_deinit(ab);
++ 	ath11k_spectral_deinit(ab);
+-- 
+2.43.0
+
+
+From b1f9b382be51fa4eace280f66bc2b10b5f733cc1 Mon Sep 17 00:00:00 2001
+From: fedo <fernan.tapia@fernandotapia.eu>
+Date: Thu, 29 Oct 2026 14:35:19 +0100
+Subject: [PATCH 2/2] mac80211: ath11k: don't create a duplicate peer on the
+ same pdev
+
+On IPQ8074 a station that moves between two BSSes of one radio, or a
+Tuya device in pairing mode that tries both, makes the firmware assert
+in wal_peer_control.c:2904 (is_graceful_to_handle) and reboots the SoC.
+ath11k sends WMI_PEER_CREATE for the new vdev while the address is still
+a peer on the other vdev of the same pdev.
+
+Refuse that peer with -EBUSY until the old one is removed. The client
+gets one rejected authentication and connects on its retry.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: fedo <fernan.tapia@fernandotapia.eu>
+---
+ package/kernel/mac80211/Makefile              |  2 +-
+ ...te-a-duplicate-peer-on-the-same-pdev.patch | 79 +++++++++++++++++++
+ 2 files changed, 80 insertions(+), 1 deletion(-)
+ create mode 100644 package/kernel/mac80211/patches/ath11k/952-wifi-ath11k-don-t-create-a-duplicate-peer-on-the-same-pdev.patch
+
+diff --git a/package/kernel/mac80211/Makefile b/package/kernel/mac80211/Makefile
+index 2b518e34bf..6a413ab587 100644
+--- a/package/kernel/mac80211/Makefile
++++ b/package/kernel/mac80211/Makefile
+@@ -11,7 +11,7 @@ include $(INCLUDE_DIR)/kernel.mk
+ PKG_NAME:=mac80211
+ 
+ PKG_VERSION:=6.18.26
+-PKG_RELEASE:=2
++PKG_RELEASE:=3
+ PKG_LICENSE:=GPL-2.0-only
+ PKG_LICENSE_FILES:=COPYING
+ 
+diff --git a/package/kernel/mac80211/patches/ath11k/952-wifi-ath11k-don-t-create-a-duplicate-peer-on-the-same-pdev.patch b/package/kernel/mac80211/patches/ath11k/952-wifi-ath11k-don-t-create-a-duplicate-peer-on-the-same-pdev.patch
+new file mode 100644
+index 0000000000..3e3554a4d3
+--- /dev/null
++++ b/package/kernel/mac80211/patches/ath11k/952-wifi-ath11k-don-t-create-a-duplicate-peer-on-the-same-pdev.patch
+@@ -0,0 +1,79 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: fedo <fernan.tapia@fernandotapia.eu>
++Date: Thu, 29 Oct 2026 12:00:00 +0100
++Subject: [PATCH] wifi: ath11k: don't create a duplicate peer on the same pdev
++
++ath11k_peer_create() accepts an address that is already a peer on
++another vdev, assuming the station is moving to another band. That holds
++when the old vdev is on another pdev. When both vdevs are on the same
++pdev, for example two AP interfaces on one 2.4 GHz radio, a station that
++moves between the two BSSes is authenticated on the new one while hostapd
++still has it on the old one. The WMI_PEER_CREATE for the second vdev then
++makes the IPQ8074 firmware (WLAN.HK.2.9.0.1-02146) assert:
++
++  wal_peer_control.c:2904 Assertion is_graceful_to_handle failed
++
++followed by "failed to find peer ... after creation" on the host, and on
++AHB the whole SoC reboots. Tuya devices in pairing mode, which try both
++BSSes of a radio within a second, cause a reboot loop.
++
++Refuse the peer with -EBUSY while the address is still a peer on another
++vdev of the same pdev, without sending the command to the firmware. The
++station add fails as it already does after the assert, hostapd rejects
++that authentication, and the client succeeds on a retry once its old
++station is removed.
++
++Signed-off-by: fedo <fernan.tapia@fernandotapia.eu>
++---
++--- a/drivers/net/wireless/ath/ath11k/peer.c
+++++ b/drivers/net/wireless/ath/ath11k/peer.c
++@@ -367,11 +367,25 @@
++ 	return ath11k_wait_for_peer_common(ar->ab, vdev_id, addr, true);
++ }
++ 
+++static bool ath11k_peer_vdev_on_pdev(struct ath11k *ar, u32 vdev_id)
+++{
+++	struct ath11k_vif *arvif;
+++
+++	lockdep_assert_held(&ar->conf_mutex);
+++
+++	list_for_each_entry(arvif, &ar->arvifs, list)
+++		if (arvif->vdev_id == vdev_id)
+++			return true;
+++
+++	return false;
+++}
+++
++ int ath11k_peer_create(struct ath11k *ar, struct ath11k_vif *arvif,
++ 		       struct ieee80211_sta *sta, struct peer_create_params *param)
++ {
++ 	struct ath11k_peer *peer;
++ 	struct ath11k_sta *arsta;
+++	int old_vdev_id;
++ 	int ret, fbret;
++ 
++ 	lockdep_assert_held(&ar->conf_mutex);
++@@ -392,6 +406,23 @@
++ 			return -EINVAL;
++ 		}
++ 
+++		/* The firmware asserts (wal_peer_control.c
+++		 * "is_graceful_to_handle") when a peer is created for an
+++		 * address that is still a peer on another vdev of the same
+++		 * pdev. This happens when a station moves between two BSSes
+++		 * of one radio before its old station is removed. Refuse the
+++		 * new peer until the old one is gone.
+++		 */
+++		if (ath11k_peer_vdev_on_pdev(ar, peer->vdev_id)) {
+++			old_vdev_id = peer->vdev_id;
+++			spin_unlock_bh(&ar->ab->base_lock);
+++			mutex_unlock(&ar->ab->tbl_mtx_lock);
+++			ath11k_warn(ar->ab,
+++				    "peer %pM still exists on vdev %d, not creating it on vdev %u\n",
+++				    param->peer_addr, old_vdev_id, param->vdev_id);
+++			return -EBUSY;
+++		}
+++
++ 		/* Assume sta is transitioning to another band.
++ 		 * Remove here the peer from rhash.
++ 		 */
+-- 
+2.43.0
+
