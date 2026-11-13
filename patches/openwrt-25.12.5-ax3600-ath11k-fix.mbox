@@ -200,7 +200,7 @@ index 0000000000..996ce9b5b0
 
 
 From b1f9b382be51fa4eace280f66bc2b10b5f733cc1 Mon Sep 17 00:00:00 2001
-From: fedo <fernan.tapia@fernandotapia.eu>
+From: Fernando Tapia <fernan.tapia@fernandotapia.eu>
 Date: Thu, 29 Oct 2026 14:35:19 +0100
 Subject: [PATCH 2/2] mac80211: ath11k: don't create a duplicate peer on the
  same pdev
@@ -215,7 +215,8 @@ Refuse that peer with -EBUSY until the old one is removed. The client
 gets one rejected authentication and connects on its retry.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Signed-off-by: fedo <fernan.tapia@fernandotapia.eu>
+Assisted-by: Claude:claude-sonnet-5-5
+Signed-off-by: Fernando Tapia <fernan.tapia@fernandotapia.eu>
 ---
  package/kernel/mac80211/Makefile              |  2 +-
  ...te-a-duplicate-peer-on-the-same-pdev.patch | 79 +++++++++++++++++++
@@ -242,7 +243,7 @@ index 0000000000..3e3554a4d3
 +++ b/package/kernel/mac80211/patches/ath11k/952-wifi-ath11k-don-t-create-a-duplicate-peer-on-the-same-pdev.patch
 @@ -0,0 +1,79 @@
 +From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-+From: fedo <fernan.tapia@fernandotapia.eu>
++From: Fernando Tapia <fernan.tapia@fernandotapia.eu>
 +Date: Thu, 29 Oct 2026 12:00:00 +0100
 +Subject: [PATCH] wifi: ath11k: don't create a duplicate peer on the same pdev
 +
@@ -266,7 +267,8 @@ index 0000000000..3e3554a4d3
 +that authentication, and the client succeeds on a retry once its old
 +station is removed.
 +
-+Signed-off-by: fedo <fernan.tapia@fernandotapia.eu>
++Assisted-by: Claude:claude-sonnet-5-5
+Signed-off-by: Fernando Tapia <fernan.tapia@fernandotapia.eu>
 +---
 +--- a/drivers/net/wireless/ath/ath11k/peer.c
 ++++ b/drivers/net/wireless/ath/ath11k/peer.c

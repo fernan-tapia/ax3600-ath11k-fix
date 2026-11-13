@@ -1,5 +1,5 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: fedo <fernan.tapia@fernandotapia.eu>
+From: Fernando Tapia <fernan.tapia@fernandotapia.eu>
 Date: Thu, 29 Oct 2026 12:00:00 +0100
 Subject: [PATCH] wifi: ath11k: don't create a duplicate peer on the same pdev
 
@@ -23,7 +23,8 @@ station add fails as it already does after the assert, hostapd rejects
 that authentication, and the client succeeds on a retry once its old
 station is removed.
 
-Signed-off-by: fedo <fernan.tapia@fernandotapia.eu>
+Assisted-by: Claude:claude-sonnet-5-5
+Signed-off-by: Fernando Tapia <fernan.tapia@fernandotapia.eu>
 ---
 --- a/drivers/net/wireless/ath/ath11k/peer.c
 +++ b/drivers/net/wireless/ath/ath11k/peer.c
