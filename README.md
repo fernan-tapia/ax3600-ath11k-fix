@@ -1,5 +1,7 @@
 # ax3600-ath11k-fix
 
+> **Superseded (2026-11-18):** patch 952 duplicates Remi Pommarel's earlier patch, [wifi: ath11k: Avoid adding the same peer twice to a pdev](https://lore.kernel.org/linux-wireless/1316ed692b84f1d956e4854d9e974569a3961795.1784792420.git.repk@triplefau.lt/), and was withdrawn from the list. Use his patch instead of 952. Patches 950/951 are unchanged (already in ath-next).
+
 Fix for the Xiaomi AX3600 (IPQ8074, ath11k) rebooting when a Wi-Fi client moves between two SSIDs on the same 2.4 GHz radio. Related: openwrt/openwrt#24864.
 
 ## Problem
